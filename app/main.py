@@ -6,122 +6,104 @@ from app.schema.models import (
     ShipmentStatus,
     CarrierChoice,
     Student,
-    ContactDetail,
 )
+from app.database import shipments, save
 
-app = FastAPI(title="Shipment Management API")
-
-
-# ==========================================
-# In-Memory Database (Stores Pydantic objects)
-# ==========================================
-
-shipments: dict[int, Shipment] = {
-    1: Shipment(
-        id=1,
-        recipient="Moiz Husain",
-        phone="+919511843388",
-        destination="Mumbai, India",
-        status=ShipmentStatus.DELIVERED,
-        items=["Mechanical Keyboard", "USB-C Hub"],
-        weight_kg=1.4,
-        carrier="BlueDart"
-    ),
-    2: Shipment(
-        id=2,
-        recipient="Ayaan Sharma",
-        phone="+919876543210",
-        destination="Bangalore, India",
-        status=ShipmentStatus.IN_TRANSIT,
-        items=["Ergonomic Mouse"],
-        weight_kg=0.35,
-        carrier="Delhivery"
-    ),
-    3: Shipment(
-        id=3,
-        recipient="Sara Khan",
-        phone="+919123456789",
-        destination="Delhi, India",
-        status=ShipmentStatus.PENDING,
-        items=["27-inch Monitor", "HDMI Cable"],
-        weight_kg=6.8,
-        carrier="FedEx"
-    )
-}
+# Initialize FastAPI application
+app = FastAPI(
+    title="Shipment & Student Management API",
+    description="A beginner-friendly REST API demonstrating CRUD, Pydantic validation, Enums, and Literals.",
+    version="1.0.0"
+)
 
 # In-memory database for students
 students_db: dict[int, Student] = {}
 
 
 # ==========================================
-# API Endpoints (CRUD)
+# Root Endpoint
 # ==========================================
 
-@app.get("/")
+@app.get("/", tags=["General"])
 def read_root() -> dict[str, str]:
-    return {"message": "Welcome to Shipment API!"}
+    """Health check endpoint to verify server is running."""
+    return {"message": "Welcome to the FastAPI Study API!"}
 
 
-# READ ALL
-@app.get("/shipments", response_model=list[Shipment])
+# ==========================================
+# Shipment Endpoints (CRUD)
+# ==========================================
+
+# 1. READ ALL: Get list of all shipments
+@app.get("/shipments", response_model=list[Shipment], tags=["Shipments"])
 def get_all_shipments() -> list[Shipment]:
-    """Returns a list of all shipments"""
+    """Returns a list of all existing shipments."""
     return list(shipments.values())
 
 
-# SEARCH / FILTER (Multi-query parameters with Literal & Enum)
-@app.get("/shipments/search", response_model=list[Shipment])
+# 2. SEARCH & FILTER: Multi-query parameters with Enum and Literal dropdowns
+# Note: Defined before /shipments/{id} to prevent path collision
+@app.get("/shipments/search", response_model=list[Shipment], tags=["Shipments"])
 def filter_shipments(
     status: ShipmentStatus | None = None,
     carrier: CarrierChoice | None = None,
     city: str | None = None,
     max_weight: float | None = None
 ) -> list[Shipment]:
-    """Filter shipments using query parameters (Status and Carrier have dropdowns!)"""
+    """
+    Filters shipments using optional query parameters.
+    - status: Choice from ShipmentStatus Enum
+    - carrier: Choice from CarrierChoice Literal
+    - city: Substring match on destination
+    - max_weight: Upper limit for weight in kg
+    """
     return [
         s for s in shipments.values()
-        if (status is None or s.status.lower() == status.lower())
-        and (carrier is None or s.carrier.lower() == carrier.lower())
-        and (city is None or city.lower() in s.destination.lower())
-        and (max_weight is None or s.weight_kg <= max_weight)
+        if (status is None or s["status"].lower() == status.lower())
+        and (carrier is None or s["carrier"].lower() == carrier.lower())
+        and (city is None or city.lower() in s["destination"].lower())
+        and (max_weight is None or s["weight_kg"] <= max_weight)
     ]
 
 
-# READ ONE
-@app.get("/shipments/{id}", response_model=Shipment)
+# 3. READ ONE: Get shipment by unique ID
+@app.get("/shipments/{id}", response_model=Shipment, tags=["Shipments"])
 def get_shipment_by_id(id: int) -> Shipment:
-    """Returns a single shipment by its ID"""
+    """Returns a single shipment by its ID (returns 404 if not found)."""
     if id not in shipments:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Shipment {id} not found"
+            detail=f"Shipment {id} not found."
         )
     return shipments[id]
 
 
-# READ DYNAMIC FIELD
-@app.get("/shipments/field/{field_name}")
+# 4. READ FIELD: Dynamically fetch one specific field of a shipment
+@app.get("/shipments/field/{field_name}", tags=["Shipments"])
 def get_shipment_field(field_name: str, id: int) -> dict[str, Any]:
-    """Dynamically get a specific field value of a shipment"""
+    """Fetches a specific field value (e.g. status, carrier, recipient) for a shipment."""
     if id not in shipments:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Shipment {id} not found")
-    
-    shipment_dict = shipments[id].model_dump()
-    if field_name not in shipment_dict:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Field '{field_name}' not found. Available: {list(shipment_dict.keys())}"
+            detail=f"Shipment {id} not found."
+        )
+    
+    shipment_dict = shipments[id]
+    if field_name not in shipment_dict:
+        available_fields = list(shipment_dict.keys())
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Field '{field_name}' not found. Available fields: {available_fields}"
         )
 
     return {"id": id, "field": field_name, "value": shipment_dict[field_name]}
 
 
-# CREATE (POST)
-@app.post("/shipments", response_model=Shipment, status_code=status.HTTP_201_CREATED)
+# 5. CREATE (POST): Add a new shipment and save to JSON
+@app.post("/shipments", response_model=Shipment, status_code=status.HTTP_201_CREATED, tags=["Shipments"])
 def create_shipment(payload: Shipment) -> Shipment:
     """
-    Creates a new shipment.
-    Pydantic automatically validates types, formats, and required fields!
+    Creates a new shipment and permanently writes it to shipments.json.
     """
     if payload.id in shipments:
         raise HTTPException(
@@ -129,47 +111,54 @@ def create_shipment(payload: Shipment) -> Shipment:
             detail=f"Shipment with ID {payload.id} already exists."
         )
 
-    shipments[payload.id] = payload
+    # Save to in-memory dictionary and persist to JSON file
+    new_data = payload.model_dump()
+    shipments[payload.id] = new_data
+    save()
+
     return payload
 
 
-# FULL UPDATE (PUT)
-@app.put("/shipments/{id}", response_model=Shipment)
+# 6. FULL UPDATE (PUT): Replace an entire shipment and save to JSON
+@app.put("/shipments/{id}", response_model=Shipment, tags=["Shipments"])
 def update_shipment(id: int, payload: Shipment) -> Shipment:
-    """Replaces an entire shipment"""
+    """Replaces all fields of an existing shipment and persists to JSON."""
     if id not in shipments:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Shipment {id} not found."
         )
 
+    # Keep URL ID consistent with model ID
     payload.id = id
-    shipments[id] = payload
+    shipments[id] = payload.model_dump()
+    save()
+
     return payload
 
 
-# PARTIAL UPDATE (PATCH)
-@app.patch("/shipments/{id}", response_model=Shipment)
+# 7. PARTIAL UPDATE (PATCH): Update only the fields provided and save to JSON
+@app.patch("/shipments/{id}", response_model=Shipment, tags=["Shipments"])
 def patch_shipment(id: int, payload: ShipmentUpdate) -> Shipment:
-    """Partially updates only the fields provided in the body"""
+    """Partially updates specified fields and persists to JSON."""
     if id not in shipments:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Shipment {id} not found."
         )
 
-    existing_shipment = shipments[id]
+    # Update only the fields sent in request
     update_data = payload.model_dump(exclude_unset=True)
-    updated_shipment = existing_shipment.model_copy(update=update_data)
-    shipments[id] = updated_shipment
+    shipments[id].update(update_data)
+    save()
 
-    return updated_shipment
+    return shipments[id]
 
 
-# DELETE
-@app.delete("/shipments/{id}")
+# 8. DELETE: Remove a shipment by ID and save to JSON
+@app.delete("/shipments/{id}", tags=["Shipments"])
 def delete_shipment(id: int) -> dict[str, Any]:
-    """Deletes a shipment by ID"""
+    """Deletes a shipment by ID and saves changes to JSON."""
     if id not in shipments:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -177,6 +166,8 @@ def delete_shipment(id: int) -> dict[str, Any]:
         )
 
     deleted_item = shipments.pop(id)
+    save()
+
     return {
         "message": f"Shipment {id} deleted successfully!",
         "deleted_item": deleted_item
@@ -184,18 +175,18 @@ def delete_shipment(id: int) -> dict[str, Any]:
 
 
 # ==========================================
-# Student API Endpoints
+# Student Endpoints
 # ==========================================
 
-# CREATE Student (POST)
-@app.post("/students", response_model=Student, status_code=status.HTTP_201_CREATED)
+# 1. CREATE Student (POST)
+@app.post("/students", response_model=Student, status_code=status.HTTP_201_CREATED, tags=["Students"])
 def create_student(payload: Student) -> Student:
     """
     Registers a new student.
-    - Validates email domain and syntax
+    - Validates email syntax and blocks fake domains
     - Validates phone (+91 and digit rules)
-    - Validates CGPA (0.0 to 10.0)
-    - Validates emergency contact for minors (<18)
+    - Validates CGPA range (0.0 to 10.0)
+    - Enforces emergency contact for students under 18
     """
     if payload.id in students_db:
         raise HTTPException(
@@ -207,17 +198,17 @@ def create_student(payload: Student) -> Student:
     return payload
 
 
-# GET all students
-@app.get("/students", response_model=list[Student])
+# 2. READ ALL Students
+@app.get("/students", response_model=list[Student], tags=["Students"])
 def get_all_students() -> list[Student]:
-    """Returns all registered students"""
+    """Returns a list of all registered students."""
     return list(students_db.values())
 
 
-# GET student by ID
+# 3. READ ONE Student by ID
 @app.get("/students/{id}", response_model=Student)
 def get_student_by_id(id: int) -> Student:
-    """Returns a specific student by ID"""
+    """Returns a single student by their ID."""
     if id not in students_db:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
